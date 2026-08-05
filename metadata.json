@@ -1,0 +1,38 @@
+{
+  "model": {
+    "provider": "OpenAI",
+    "name": "gpt-4o-mini",
+    "parameter_size": "not publicly disclosed",
+    "api": "Responses API",
+    "execution_mode": "openai-api",
+    "usage": {
+      "request_count": 250,
+      "input_tokens": 75200,
+      "output_tokens": 14113
+    },
+    "role": "Specialist domain review; verified CSV arithmetic and final hard gate remain deterministic."
+  },
+  "framework": "custom-python-multi-agent + OpenAI Responses API",
+  "runtime": {
+    "language": "Python",
+    "python_version": "3.14.6",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "policy_version": "EC_POLICY_V2",
+  "latest_run": {
+    "completed_at_utc": "2026-08-05T09:17:29.841216+00:00",
+    "case_count": 50,
+    "output_count": 50,
+    "primary_issue_counts": {
+      "canceled_order_paid": 8,
+      "late_delivery_logistics": 10,
+      "late_delivery_seller": 10,
+      "unavailable_order_paid": 6,
+      "unsupported_late_claim": 8,
+      "valid_split_payment": 8
+    },
+    "trace_file": "trace.jsonl",
+    "zip_file": "output.zip",
+    "status": "completed_and_verified"
+  }
+}
