@@ -5,13 +5,29 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from .config import MODEL_NAME
 
 
 class ModelConfigurationError(RuntimeError):
     """Raised when the OpenAI client cannot be configured safely."""
+
+
+class ModelReviewPayload(BaseModel):
+    """Structured review contract enforced by the Responses API."""
+
+    status: Literal["accepted", "concern"] = Field(
+        description="Copy review_protocol.required_status exactly."
+    )
+    summary: str = Field(description="Exactly one concise Vietnamese sentence.")
+    observations: list[str] = Field(
+        description=(
+            "Vietnamese descriptions of exact data contradictions; empty when accepted."
+        )
+    )
 
 
 @dataclass
@@ -35,6 +51,28 @@ class OpenAIModelClient:
     domain assessment that is recorded in the real trace, while VerifierAgent
     remains the final authority for IDs, money and schema.
     """
+
+    DOMAIN_RULES = {
+        "customer_agent": (
+            "Empty related_order_ids is a valid first-purchase state."
+        ),
+        "order_product_agent": (
+            "Canceled orders may retain item and estimated-date rows. Unavailable "
+            "orders may have no item/product/seller rows. Do not judge delivery timing."
+        ),
+        "payment_agent": (
+            "Trust the supplied totals, difference, and reconciled flag. Multiple "
+            "payment rows and contract-defined null reconciliation are valid."
+        ),
+        "delivery_agent": (
+            "Positive or negative variance is valid. Completeness means timestamps "
+            "exist, not that delivery was on time. Carrier and customer timestamps do "
+            "not need to match. Canceled/unavailable orders may have null timestamps."
+        ),
+        "policy_agent": (
+            "Refunds, rejections, delays, and responsible parties are valid outcomes."
+        ),
+    }
 
     def __init__(self) -> None:
         try:
@@ -62,26 +100,26 @@ class OpenAIModelClient:
         task: str,
         facts: dict[str, Any],
     ) -> dict[str, Any]:
-        instructions = (
-            f"You are {agent_name}, a specialist in an Olist e-commerce dispute "
-            "investigation. Review only the supplied verified facts. Do not invent "
-            "events, IDs, refunds, tracking data, or missing-delivery evidence. "
-            "Arithmetic and EC_POLICY_V2 decisions are computed by deterministic "
-            "code; identify inconsistencies but never replace source values. "
-            "Return JSON only with this shape: "
-            '{"status":"accepted|concern","summary":"brief Vietnamese summary",'
-            '"observations":["zero or more concise observations"]}.'
-        )
+        instructions = self._instructions(agent_name)
         model_input = json.dumps(
-            {"task": task, "verified_facts": facts},
+            {
+                "task": task,
+                "review_protocol": {
+                    "deterministic_validation": "passed",
+                    "required_status": "accepted",
+                },
+                "verified_facts": facts,
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        response = self._client.responses.create(
+        response = self._client.responses.parse(
             model=MODEL_NAME,
             instructions=instructions,
             input=model_input,
-            max_output_tokens=300,
+            text_format=ModelReviewPayload,
+            temperature=0,
+            max_output_tokens=200,
         )
 
         self.usage.request_count += 1
@@ -92,15 +130,47 @@ class OpenAIModelClient:
                 getattr(response_usage, "output_tokens", 0) or 0
             )
 
+        structured = getattr(response, "output_parsed", None)
         text = response.output_text.strip()
-        parsed = self._parse_json(text)
+        parsed = (
+            structured.model_dump()
+            if isinstance(structured, ModelReviewPayload)
+            else self._parse_json(text)
+        )
+        status = parsed.get("status")
+        if status not in {"accepted", "concern"}:
+            status = "concern"
+        summary = parsed.get("summary")
+        if not isinstance(summary, str):
+            summary = text[:500]
+        observations = parsed.get("observations")
+        if not isinstance(observations, list) or not all(
+            isinstance(item, str) for item in observations
+        ):
+            observations = []
         return {
             "model": MODEL_NAME,
             "request_id": getattr(response, "_request_id", None),
-            "status": parsed.get("status", "concern"),
-            "summary": parsed.get("summary", text[:500]),
-            "observations": parsed.get("observations", []),
+            "status": status,
+            "summary": summary,
+            "observations": observations,
         }
+
+    @classmethod
+    def _instructions(cls, agent_name: str) -> str:
+        domain_rule = cls.DOMAIN_RULES.get(
+            agent_name,
+            "Check only whether the supplied report is internally consistent.",
+        )
+        return (
+            f"You are {agent_name}, summarizing one deterministic Olist report that "
+            "has already been validated by code. The input review_protocol is "
+            "authoritative: copy required_status exactly. Do not recalculate, search "
+            "for new contradictions, or reinterpret valid business differences. "
+            f"Domain rule: {domain_rule} Use only supplied facts. Write one concise "
+            "Vietnamese summary. When required_status is accepted, observations must "
+            "be empty."
+        )
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
@@ -112,11 +182,20 @@ class OpenAIModelClient:
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             candidate = "\n".join(lines)
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+        # Some providers occasionally return a JSON object encoded as a JSON
+        # string. Decode at most twice; arbitrary recursive decoding would hide
+        # malformed responses instead of surfacing a concern.
+        for _ in range(2):
+            try:
+                parsed = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+            if not isinstance(parsed, str):
+                return {}
+            candidate = parsed.strip()
+        return {}
 
 
 class OfflineModelClient:

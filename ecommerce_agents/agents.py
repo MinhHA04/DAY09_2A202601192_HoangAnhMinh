@@ -149,11 +149,23 @@ class DeliveryAgent(ModelBackedAgent):
                 }
             )
 
-        late_delivery = False
-        if delivered_at and estimated_at:
+        # Missing timestamps mean "unknown", not "on time".  Keeping this as a
+        # tri-state fact prevents lower-priority payment rules from winning when
+        # the pipeline cannot first rule out a late-delivery case.
+        delivery_timing_complete = bool(delivered_at and estimated_at)
+        late_delivery: bool | None = None
+        if delivery_timing_complete:
             late_delivery = parse_timestamp(delivered_at) > parse_timestamp(estimated_at)
 
+        # A late order can only be attributed to logistics after every seller
+        # handoff can be checked.  This flag stays internal to the handoff; the
+        # required output schema remains unchanged.
+        handoff_timing_complete = bool(items) and bool(carrier_at) and all(
+            item.get("shipping_limit_date") for item in items
+        )
+
         return self._with_model_review("Review delivery and seller handoff timing.", {
+            "order_status": order.get("order_status"),
             "delivered_at": delivered_at,
             "estimated_delivery_at": estimated_at,
             "carrier_handoff_at": carrier_at,
@@ -163,6 +175,8 @@ class DeliveryAgent(ModelBackedAgent):
                 row["seller_id"] for row in seller_analysis if row["late_handoff"]
             ],
             "late_delivery": late_delivery,
+            "delivery_timing_complete": delivery_timing_complete,
+            "handoff_timing_complete": handoff_timing_complete,
         })
 
 
@@ -186,18 +200,39 @@ class PolicyAgent(ModelBackedAgent):
             primary_issue = "canceled_order_paid"
         elif order["order_status"] == "unavailable" and payment_total > 0:
             primary_issue = "unavailable_order_paid"
-        elif delivery["late_delivery"] and delivery["late_handoff_seller_ids"]:
+        elif (
+            delivery["late_delivery"] is True
+            and delivery.get("handoff_timing_complete", False)
+            and delivery["late_handoff_seller_ids"]
+        ):
             primary_issue = "late_delivery_seller"
-        elif delivery["late_delivery"]:
+        elif (
+            delivery["late_delivery"] is True
+            and delivery.get("handoff_timing_complete", False)
+        ):
             primary_issue = "late_delivery_logistics"
-        elif len(payments) >= 2 and payment["reconciled"] is True:
+        elif (
+            delivery["late_delivery"] is False
+            and len(payments) >= 2
+            and payment["reconciled"] is True
+        ):
             primary_issue = "valid_split_payment"
         elif delivery["late_delivery"] is False and payment["reconciled"] is True:
             primary_issue = "unsupported_late_claim"
 
         if primary_issue is None:
+            if delivery["late_delivery"] is None:
+                reason = "missing delivered/estimated timestamps"
+            elif (
+                delivery["late_delivery"] is True
+                and not delivery.get("handoff_timing_complete", False)
+            ):
+                reason = "missing carrier/shipping-limit timestamps"
+            else:
+                reason = "no primary rule matched"
             raise PolicyDecisionError(
-                f'Order {order["order_id"]} does not match an EC_POLICY_V2 primary rule'
+                f'Order {order["order_id"]} cannot be decided under EC_POLICY_V2: '
+                f"{reason}"
             )
 
         secondary: list[str] = []

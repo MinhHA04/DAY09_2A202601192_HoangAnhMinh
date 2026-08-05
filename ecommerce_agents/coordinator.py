@@ -49,7 +49,22 @@ class CoordinatorAgent:
             "main",
             self.name,
             "case_received",
-            {"order_id": order_id, "policy_version": policy_version, "scope": scope},
+            {
+                "order_id": order_id,
+                "policy_version": policy_version,
+                "scope": scope,
+                "claim_handling": "untrusted_context_only",
+                "customer_message_used_as_evidence": False,
+                "decision_basis": "claimed_order_id_joined_to_verified_csv_rows",
+                "required_verification": [
+                    "order",
+                    "customer",
+                    "items",
+                    "payments",
+                    "delivery",
+                    "policy",
+                ],
+            },
         )
 
         customer = self.customer_agent.investigate(
@@ -76,7 +91,9 @@ class CoordinatorAgent:
         result = self._assemble(
             case_id, order_id, customer, order_product, payment, delivery, decision
         )
-        verification = self.verifier_agent.verify(result, order_id)
+        verification = self.verifier_agent.verify(
+            result, order_id, scope, expected_case_id=case_id
+        )
         self.trace.emit(
             case_id,
             self.verifier_agent.name,
@@ -92,6 +109,9 @@ class CoordinatorAgent:
             {
                 "primary_issue": decision["primary_issue"],
                 "refund_brl": decision["recommended_refund_brl"],
+                "verification": "passed",
+                "action_mode": "recommendation_only",
+                "external_action_executed": False,
             },
         )
         return result

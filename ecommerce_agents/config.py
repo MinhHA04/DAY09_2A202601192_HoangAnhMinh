@@ -12,6 +12,9 @@ MODEL_PARAMETER_SIZE = "not publicly disclosed"
 MODEL_API = "Responses API"
 FRAMEWORK_NAME = "custom-python-multi-agent + OpenAI Responses API"
 
+# Maximum array sizes from the output contract. Business rules can be stricter;
+# for example, affected_entities.order_ids is assembled as the claimed order
+# only, while customer history belongs in related_order_ids.
 ARRAY_LIMITS = {
     "order_ids": 5,
     "item_ids": 5,

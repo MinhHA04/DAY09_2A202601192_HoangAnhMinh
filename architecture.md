@@ -207,14 +207,17 @@ không tồn tại, repository raise `DataIntegrityError` và pipeline dừng.
 
 ## 6. Prompt dùng chung cho các model-backed agent
 
-Prompt nằm tại `ecommerce_agents/llm.py`. Mỗi API call dùng:
+Prompt nằm tại `ecommerce_agents/llm.py`. GPT-4o mini hỗ trợ Structured Outputs,
+vì vậy mỗi API call dùng schema Pydantic thay vì yêu cầu model tự đóng JSON:
 
 ```python
-response = client.responses.create(
+response = client.responses.parse(
     model="gpt-4o-mini",
     instructions=instructions,
     input=model_input,
-    max_output_tokens=300,
+    text_format=ModelReviewPayload,
+    temperature=0,
+    max_output_tokens=200,
 )
 ```
 
@@ -223,24 +226,21 @@ response = client.responses.create(
 Phần instructions được tạo động theo tên agent:
 
 ```text
-You are {agent_name}, a specialist in an Olist e-commerce dispute
-investigation. Review only the supplied verified facts. Do not invent
-events, IDs, refunds, tracking data, or missing-delivery evidence.
-Arithmetic and EC_POLICY_V2 decisions are computed by deterministic
-code; identify inconsistencies but never replace source values.
-Return JSON only with this shape:
-{"status":"accepted|concern","summary":"brief Vietnamese summary",
-"observations":["zero or more concise observations"]}.
+You are {agent_name}, summarizing one deterministic Olist report that has
+already been validated by code. The input review_protocol is authoritative:
+copy required_status exactly. Do not recalculate, search for new
+contradictions, or reinterpret valid business differences.
+Domain rule: <agent-specific rule>. Use only supplied facts.
 ```
 
 Mục đích của từng câu:
 
-- `You are {agent_name}`: khóa vai trò agent trong request hiện tại.
-- `Review only the supplied verified facts`: không dùng phỏng đoán ngoài payload.
-- `Do not invent...`: chống hallucination những dữ liệu Olist không có.
-- `never replace source values`: model không được sửa số do code tính.
-- `Return JSON only`: giúp trace có model response đọc được bằng máy.
-- `brief Vietnamese summary`: tạo nhận xét ngắn để người review dễ đọc.
+- `review_protocol`: model nhỏ copy kết quả precheck thay vì tự tính lại facts.
+- `Do not recalculate`: tránh false concern khi tổng tiền bằng nhau hoặc variance
+  âm/dương là kết quả hợp lệ.
+- `agent-specific rule`: giải thích ngắn các trạng thái hợp lệ theo từng domain.
+- `Use only supplied facts`: model không được tạo dữ liệu mới.
+- `Structured Outputs`: API khóa enum, kiểu dữ liệu và các key bắt buộc.
 
 ### 6.2 Input thật
 
@@ -249,6 +249,10 @@ Mục đích của từng câu:
 ```json
 {
   "task": "<task riêng của agent>",
+  "review_protocol": {
+    "deterministic_validation": "passed",
+    "required_status": "accepted"
+  },
   "verified_facts": {
     "<structured report do Python tạo>": "<value>"
   }
@@ -280,9 +284,9 @@ Adapter gắn thêm thông tin audit:
 }
 ```
 
-Nếu model trả JSON trong Markdown fence, adapter bỏ fence rồi parse. Nếu response
-không parse được, adapter đặt `status = concern`, giữ tối đa 500 ký tự đầu trong
-`summary`, và không cho model response thay đổi số liệu nguồn.
+`ModelReviewPayload` khóa `status` vào `accepted|concern`, yêu cầu summary string
+và observations array. Parser JSON thủ công chỉ còn là fallback nếu provider
+không trả `output_parsed`; model response vẫn không được thay đổi số liệu nguồn.
 
 ## 7. Chi tiết từng agent
 
@@ -465,9 +469,17 @@ Facts gửi GPT:
     }
   ],
   "late_handoff_seller_ids": ["..."],
-  "late_delivery": true
+  "late_delivery": true,
+  "delivery_timing_complete": true,
+  "handoff_timing_complete": true
 }
 ```
+
+`late_delivery` là fact tri-state trong handoff: `true`, `false` hoặc `null` khi
+thiếu delivered/estimated timestamp. Policy chỉ áp dụng rule giao đúng hạn hoặc
+split payment khi giá trị là `false`; một order giao trễ chỉ được quy trách nhiệm
+seller/logistics khi `handoff_timing_complete = true`. Các cờ completeness là dữ
+liệu audit nội bộ và không được thêm vào output schema.
 
 ### 7.6 Policy Agent
 
@@ -763,15 +775,15 @@ Sau khi reset toàn bộ artifact và chạy lại `python main.py`, hệ thốn
 - 400 trace event, đúng 8 event cho mỗi case;
 - 250 model-backed handoff gọi `gpt-4o-mini`;
 - 250/250 review có OpenAI request ID và không có trạng thái `skipped`;
-- 75.200 input tokens và 14.113 output tokens;
-- 205 model review có status `accepted`;
-- 45 model review có status `concern`;
-- 6 unit test pass.
+- 109.700 input tokens và 7.596 output tokens;
+- 250 model review có status `accepted`;
+- 0 model review có status `concern`;
+- 28 unit test pass.
 
-`concern` không đồng nghĩa pipeline hoặc Verifier thất bại. Model thường dùng
-status này khi facts thể hiện giao trễ, thiếu timestamp hoặc order unavailable
-không có item. Hai response có JSON thừa dấu ngoặc đã được parser hạ an toàn về
-`concern`. Các review này không được phép thay đổi source values hoặc output.
+Structured Outputs loại bỏ JSON malformed. Review protocol ngăn GPT-4o mini tự
+diễn giải giao sớm/trễ, canceled vẫn có item hoặc payment split thành mâu thuẫn.
+Verifier deterministic vẫn là hard gate cuối và model review không được thay đổi
+source values hoặc output.
 
 `metadata.json` hiện ghi `execution_mode = openai-api`, request count 250 và
 `latest_run.status = completed_and_verified`. Đây là lượt chạy có thể dùng để

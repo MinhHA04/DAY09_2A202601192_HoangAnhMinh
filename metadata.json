@@ -7,8 +7,8 @@
     "execution_mode": "openai-api",
     "usage": {
       "request_count": 250,
-      "input_tokens": 75200,
-      "output_tokens": 14113
+      "input_tokens": 109700,
+      "output_tokens": 7596
     },
     "role": "Specialist domain review; verified CSV arithmetic and final hard gate remain deterministic."
   },
@@ -20,7 +20,7 @@
   },
   "policy_version": "EC_POLICY_V2",
   "latest_run": {
-    "completed_at_utc": "2026-08-05T09:17:29.841216+00:00",
+    "completed_at_utc": "2026-08-05T16:57:26.981169+00:00",
     "case_count": 50,
     "output_count": 50,
     "primary_issue_counts": {
